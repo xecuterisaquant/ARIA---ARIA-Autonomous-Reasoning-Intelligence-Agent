@@ -8,8 +8,8 @@ import json
 import os
 import uuid
 
-_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("ARIA_LOG_DIR", "logs"))
-MEMORY_PATH = os.path.join(_LOG_DIR, "memory.json")
+from config import LOG_DIR
+MEMORY_PATH = os.path.join(LOG_DIR, "memory.json")
 
 
 # ─── Persistence helpers ──────────────────────────────────────────────────────

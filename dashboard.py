@@ -6,16 +6,12 @@ Run standalone:  python dashboard.py
 Or imported by aria.py which starts it in a daemon thread.
 """
 import json
-import os
 
 from flask import Flask, jsonify, render_template_string
 
-app = Flask(__name__)
+from config import LOG_PATH as TRADES_PATH, STATUS_PATH, DASHBOARD_PORT as PORT
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("ARIA_LOG_DIR", "logs"))
-TRADES_PATH = os.path.join(LOG_DIR, "trades.json")
-STATUS_PATH = os.path.join(LOG_DIR, "status.json")
-PORT = int(os.environ.get("PORT", "8080"))
+app = Flask(__name__)
 
 
 def _read_json(path: str, default):
