@@ -148,9 +148,9 @@ def get_market_data(symbol: str) -> dict:
     return result
 
 
-def get_claude_decision(market_data: dict) -> dict:
+def get_claude_decision(market_data: dict, portfolio_state: dict | None = None) -> dict:
     """
-    Pass market data to Claude and get a structured trading decision.
+    Pass market data and portfolio context to Claude and get a structured trading decision.
 
     Returns a dict with keys: action, confidence, reasoning, risk_level, error.
     """
@@ -161,9 +161,10 @@ def get_claude_decision(market_data: dict) -> dict:
     change_str = f"{change_pct * 100:+.2f}%" if change_pct is not None else "N/A"
     price = market_data.get("price")
     price_str = f"${price:,.2f}" if price is not None else "N/A"
+    symbol = market_data.get("symbol", "")
 
     user_message = (
-        f"Asset: {market_data.get('symbol')} | "
+        f"Asset: {symbol} | "
         f"Price: {price_str} | "
         f"24h Change: {change_str} | "
         f"Signal: {market_data.get('signal')} ({market_data.get('signal_strength')}) | "
@@ -172,6 +173,56 @@ def get_claude_decision(market_data: dict) -> dict:
         f"Bollinger Upper: {market_data.get('bb_upper'):,.2f} | "
         f"Bollinger Lower: {market_data.get('bb_lower'):,.2f}"
     )
+
+    # --- Portfolio context block ---
+    if portfolio_state:
+        balance_usd = portfolio_state.get("balance_usd", 0.0)
+        positions = portfolio_state.get("positions", {})
+        ps = portfolio_state.get("portfolio_status", {})
+        trade_log = portfolio_state.get("trade_log", [])
+        trades_today = portfolio_state.get("trades_today", 0)
+
+        ctx_lines = [
+            "\n\n--- PORTFOLIO CONTEXT ---",
+            f"USD Balance: ${balance_usd:,.2f}",
+            "Open positions:",
+        ]
+        if positions:
+            for sym, pos in positions.items():
+                avg = pos.get("avg_price", 0.0)
+                vol = pos.get("volume", 0.0)
+                cur = price if sym == symbol else 0.0
+                if avg > 0 and cur > 0:
+                    upnl_pct = (cur - avg) / avg * 100
+                    ctx_lines.append(
+                        f"  {sym}: {vol:.6f} units @ avg ${avg:,.2f} | "
+                        f"Current: ${cur:,.2f} | Unrealized PnL: {upnl_pct:+.2f}%"
+                    )
+                else:
+                    ctx_lines.append(f"  {sym}: {vol:.6f} units @ avg ${avg:,.2f}")
+        else:
+            ctx_lines.append("  No open positions.")
+
+        unrealized_pnl = ps.get("unrealized_pnl", 0.0)
+        pnl_pct = ps.get("pnl_percent", 0.0)
+        pnl_sign = "+" if unrealized_pnl >= 0 else ""
+        ctx_lines.append(
+            f"Portfolio PnL (unrealized): {pnl_sign}${abs(unrealized_pnl):,.2f} "
+            f"({pnl_sign}{abs(pnl_pct):.3f}%)"
+        )
+        ctx_lines.append(f"Trades today: {trades_today}/10")
+
+        # Last 3 decisions for this specific asset
+        asset_decisions = [t for t in trade_log if t.get("symbol") == symbol][-3:]
+        if asset_decisions:
+            ctx_lines.append(f"\n--- RECENT {symbol} DECISIONS ---")
+            for t in reversed(asset_decisions):
+                ctx_lines.append(
+                    f"  [{t.get('timestamp', '?')}] {t.get('action')} "
+                    f"(confidence: {t.get('confidence')}) — \"{t.get('reasoning', '')}\""  
+                )
+
+        user_message += "\n".join(ctx_lines)
 
     system_prompt = (
         "You are ARIA, an autonomous crypto trading agent. "
@@ -236,11 +287,39 @@ def check_risk(decision: dict, portfolio_state: dict) -> dict:
     confidence = decision.get("confidence", 0)
     risk_level = (decision.get("risk_level") or "").upper()
     symbol = decision.get("symbol")  # may be absent; caller should inject it
+    current_price = decision.get("current_price", 0.0)
 
     balance_usd = portfolio_state.get("balance_usd", 0.0)
     starting_balance = portfolio_state.get("starting_balance", 10000.0)
     positions = portfolio_state.get("positions", {})
     trades_today = portfolio_state.get("trades_today", 0)
+
+    # --- Pre-rules: stop-loss / take-profit (forced exits, bypass confidence + risk checks) ---
+    if symbol and current_price > 0:
+        held = positions.get(symbol.upper(), {})
+        avg_price = held.get("avg_price", 0.0) if held else 0.0
+        if avg_price > 0:
+            pct_change = (current_price - avg_price) / avg_price
+            if pct_change <= -0.05:
+                return {
+                    "approved": True,
+                    "reason": (
+                        f"Stop-loss triggered: {symbol} is {pct_change*100:.2f}% below avg entry "
+                        f"(avg ${avg_price:,.2f} → current ${current_price:,.2f})."
+                    ),
+                    "position_usd": 0.0,
+                    "forced_action": "SELL",
+                }
+            if pct_change >= 0.08:
+                return {
+                    "approved": True,
+                    "reason": (
+                        f"Take-profit triggered: {symbol} is +{pct_change*100:.2f}% above avg entry "
+                        f"(avg ${avg_price:,.2f} → current ${current_price:,.2f})."
+                    ),
+                    "position_usd": 0.0,
+                    "forced_action": "SELL",
+                }
 
     # --- Rule 1: low confidence ---
     if confidence < 60:
@@ -500,6 +579,7 @@ def main() -> None:
         "starting_balance": 10000.0,
         "positions": {},
         "trades_today": 0,
+        "last_trade_date": "",
         "trade_log": [],
         "portfolio_status": {},
     }
@@ -512,6 +592,13 @@ def main() -> None:
         try:
             cycle += 1
             now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            today = now[:10]  # YYYY-MM-DD
+
+            # --- Daily reset ---
+            if portfolio_state["last_trade_date"] and today != portfolio_state["last_trade_date"]:
+                logger.info("New UTC day (%s) — resetting trades_today counter.", today)
+                portfolio_state["trades_today"] = 0
+            portfolio_state["last_trade_date"] = today
 
             # --- Portfolio status ---
             ps = get_portfolio_status()
@@ -564,7 +651,7 @@ def main() -> None:
                     )
 
                     # --- 2. Claude decision ---
-                    decision = get_claude_decision(market_data)
+                    decision = get_claude_decision(market_data, portfolio_state)
                     if decision.get("error"):
                         logger.error("[%s] Decision error: %s", symbol, decision["error"])
                         continue
@@ -579,8 +666,13 @@ def main() -> None:
 
                     # --- 3. Risk check ---
                     decision["symbol"] = symbol
+                    decision["current_price"] = price
                     risk = check_risk(decision, portfolio_state)
                     approved = risk["approved"]
+                    # Override action if stop-loss / take-profit fired
+                    if "forced_action" in risk:
+                        action = risk["forced_action"]
+                        logger.info("[%s] Forced action override → %s", symbol, action)
                     if approved:
                         logger.info("[%s] Risk check APPROVED: %s", symbol, risk["reason"])
                     else:
