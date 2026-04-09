@@ -247,6 +247,57 @@ LOOP_INTERVAL_SECONDS = 300  # 5 minutes
 LOG_PATH = os.path.join(os.path.dirname(__file__), "logs", "trades.json")
 
 
+def get_portfolio_status() -> dict:
+    """
+    Fetch current portfolio status from `kraken paper status`.
+
+    Returns:
+      {
+        "total_value": float,      # total account value in USD
+        "unrealized_pnl": float,   # unrealized PnL in USD
+        "pnl_percent": float,      # PnL as a percentage
+        "total_trades": int,       # lifetime trade count
+        "error": str or None,
+      }
+    """
+    try:
+        status_raw = _run_kraken_json(["paper", "status"])
+        total_value = (
+            status_raw.get("total_value")
+            or status_raw.get("portfolio_value")
+            or status_raw.get("equity")
+            or 0.0
+        )
+        unrealized_pnl = (
+            status_raw.get("unrealized_pnl")
+            or status_raw.get("open_pnl")
+            or 0.0
+        )
+        pnl_percent = (
+            status_raw.get("pnl_percent")
+            or status_raw.get("return_pct")
+            or (unrealized_pnl / total_value * 100 if total_value else 0.0)
+        )
+        total_trades = (
+            status_raw.get("total_trades")
+            or status_raw.get("trade_count")
+            or 0
+        )
+        return {
+            "total_value": float(total_value),
+            "unrealized_pnl": float(unrealized_pnl),
+            "pnl_percent": float(pnl_percent),
+            "total_trades": int(total_trades),
+            "error": None,
+        }
+    except FileNotFoundError:
+        return {"error": "kraken CLI not found", "total_value": 0.0, "unrealized_pnl": 0.0, "pnl_percent": 0.0, "total_trades": 0}
+    except subprocess.TimeoutExpired:
+        return {"error": "kraken CLI timed out", "total_value": 0.0, "unrealized_pnl": 0.0, "pnl_percent": 0.0, "total_trades": 0}
+    except (json.JSONDecodeError, KeyError, RuntimeError) as e:
+        return {"error": f"get_portfolio_status failed: {e}", "total_value": 0.0, "unrealized_pnl": 0.0, "pnl_percent": 0.0, "total_trades": 0}
+
+
 def _run_kraken_json(args: list) -> dict:
     """Helper: run a kraken CLI command with -o json and return parsed output."""
     result = subprocess.run(
@@ -372,6 +423,7 @@ def main() -> None:
         "positions": {},
         "trades_today": 0,
         "trade_log": [],
+        "portfolio_status": {},
     }
     cycle = 0
 
@@ -382,6 +434,19 @@ def main() -> None:
     while True:
         cycle += 1
         now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        # --- Portfolio status ---
+        ps = get_portfolio_status()
+        portfolio_state["portfolio_status"] = ps
+        if ps.get("error"):
+            print(f"[ARIA] Portfolio status unavailable: {ps['error']}")
+        else:
+            pnl_sign = "+" if ps["unrealized_pnl"] >= 0 else ""
+            print(
+                f"[ARIA] Portfolio: ${ps['total_value']:,.2f} | "
+                f"PnL: {pnl_sign}${ps['unrealized_pnl']:,.2f} ({pnl_sign}{ps['pnl_percent']:.3f}%) | "
+                f"Trades: {ps['total_trades']}"
+            )
 
         # --- Sync portfolio state from Kraken paper account ---
         kb = get_kraken_balance()
