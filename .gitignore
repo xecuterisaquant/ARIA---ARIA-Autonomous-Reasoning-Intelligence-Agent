@@ -14,6 +14,7 @@ build/
 # Logs (keep trades.json, ignore runtime-generated files)
 logs/aria.log
 logs/status.json
+logs/memory.json
 
 # OS
 .DS_Store

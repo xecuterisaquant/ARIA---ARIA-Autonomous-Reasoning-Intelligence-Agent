@@ -10,6 +10,7 @@ import time
 import anthropic
 import requests
 from dotenv import load_dotenv
+import memory as _memory
 
 load_dotenv()
 
@@ -223,7 +224,10 @@ def get_claude_decision(market_data: dict, portfolio_state: dict | None = None) 
                 )
 
         user_message += "\n".join(ctx_lines)
-
+        # --- Past trade memory ---
+        memories = _memory.get_relevant_memories(symbol)
+        if memories:
+            user_message += f"\n\n--- PAST TRADE MEMORY ---\n{memories}"
     system_prompt = (
         "You are ARIA, an autonomous crypto trading agent. "
         "You analyze market data and make disciplined trading decisions. "
@@ -712,11 +716,13 @@ def main() -> None:
                             portfolio_state["balance_usd"] = round(
                                 portfolio_state["balance_usd"] - position_usd, 2
                             )
+                            _memory.record_entry(symbol, market_data, decision)
                         else:  # SELL
                             portfolio_state["balance_usd"] = round(
                                 portfolio_state["balance_usd"] + position_usd, 2
                             )
                             portfolio_state["positions"].pop(symbol, None)
+                            _memory.record_exit(symbol, price)
 
                         portfolio_state["trades_today"] += 1
 
