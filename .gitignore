@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Logs (keep trades.json, ignore runtime-generated files)
+logs/aria.log
+logs/status.json
+
+# OS
+.DS_Store
+Thumbs.db
