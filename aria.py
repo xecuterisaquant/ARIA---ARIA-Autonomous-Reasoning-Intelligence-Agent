@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import anthropic
@@ -21,6 +22,7 @@ LOOP_INTERVAL_SECONDS = int(os.environ.get("ARIA_LOOP_INTERVAL", "300"))
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("ARIA_LOG_DIR", "logs"))
 LOG_PATH = os.path.join(LOG_DIR, "trades.json")
 ARIA_LOG_FILE = os.path.join(LOG_DIR, "aria.log")
+STATUS_PATH = os.path.join(LOG_DIR, "status.json")
 DASHBOARD_PORT = int(os.environ.get("PORT", "8080"))
 
 # ── Logging ─────────────────────────────────────────────────────────
@@ -472,8 +474,26 @@ def _save_log(trade_log: list) -> None:
         json.dump(trade_log, f, indent=2)
 
 
+def _save_status(status: dict) -> None:
+    """Atomically write portfolio status so the dashboard never reads a partial file."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    tmp = STATUS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(status, f, indent=2)
+    os.replace(tmp, STATUS_PATH)
+
+
 def main() -> None:
     _preflight()
+
+    # Start the web dashboard in a daemon thread
+    try:
+        import dashboard as _dashboard
+        _t = threading.Thread(target=_dashboard.run_dashboard, daemon=True, name="aria-dashboard")
+        _t.start()
+        logger.info("Dashboard started on port %d", DASHBOARD_PORT)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not start dashboard: %s", exc)
 
     portfolio_state = {
         "balance_usd": 10000.0,
@@ -627,8 +647,15 @@ def main() -> None:
                 except Exception:
                     logger.exception("[%s] Unhandled error processing asset — skipping.", symbol)
 
-            # --- Save log after every full cycle ---
+            # --- Save log + status after every full cycle ---
             _save_log(portfolio_state["trade_log"])
+            _save_status({
+                "total_value": portfolio_state.get("portfolio_status", {}).get("total_value", portfolio_state["balance_usd"]),
+                "unrealized_pnl": portfolio_state.get("portfolio_status", {}).get("unrealized_pnl", 0.0),
+                "pnl_percent": portfolio_state.get("portfolio_status", {}).get("pnl_percent", 0.0),
+                "total_trades": portfolio_state.get("portfolio_status", {}).get("total_trades", len(portfolio_state["trade_log"])),
+                "timestamp": now,
+            })
             logger.info("Log saved → %s", LOG_PATH)
             logger.info("Sleeping %ds until next cycle...", LOOP_INTERVAL_SECONDS)
 
