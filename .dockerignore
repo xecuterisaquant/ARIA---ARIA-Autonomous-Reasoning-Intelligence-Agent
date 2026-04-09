@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.venv
+__pycache__
+*.pyc
+*.pyo
+logs/aria.log
+logs/status.json
+logs/memory.json
+README.md
+railway.toml

@@ -1,14 +1,10 @@
 [build]
-builder = "dockerfile"
+builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python aria.py"
+startCommand = "kraken paper init 2>/dev/null || true && python aria.py"
 healthcheckPath = "/"
-healthcheckTimeout = 30
-
-[[services]]
-name = "aria-agent"
-
-[services.variables]
-PORT = "8080"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
