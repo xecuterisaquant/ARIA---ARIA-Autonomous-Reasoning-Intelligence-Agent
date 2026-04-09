@@ -1,15 +1,76 @@
 import datetime
 import json
+import logging
 import os
 import subprocess
+import sys
 import time
 
 import anthropic
 import requests
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# ── Config from environment ─────────────────────────────────────────────
 BASE_URL = "https://api.prismapi.ai"
 API_KEY = os.environ.get("PRISM_API_KEY", "").strip()
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+ASSETS = [s.strip().upper() for s in os.environ.get("ARIA_ASSETS", "BTC,ETH").split(",") if s.strip()]
+LOOP_INTERVAL_SECONDS = int(os.environ.get("ARIA_LOOP_INTERVAL", "300"))
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("ARIA_LOG_DIR", "logs"))
+LOG_PATH = os.path.join(LOG_DIR, "trades.json")
+ARIA_LOG_FILE = os.path.join(LOG_DIR, "aria.log")
+DASHBOARD_PORT = int(os.environ.get("PORT", "8080"))
+
+# ── Logging ─────────────────────────────────────────────────────────
+os.makedirs(LOG_DIR, exist_ok=True)
+_fmt = logging.Formatter("[ARIA] %(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ")
+_fh = logging.FileHandler(ARIA_LOG_FILE, encoding="utf-8")
+_fh.setFormatter(_fmt)
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setFormatter(_fmt)
+logger = logging.getLogger("aria")
+logger.setLevel(logging.INFO)
+logger.addHandler(_fh)
+logger.addHandler(_sh)
+
+
+# ── Startup preflight ─────────────────────────────────────────────────
+def _preflight() -> None:
+    """Verify all required dependencies and config before starting the agent."""
+    errors = []
+
+    if not API_KEY:
+        errors.append("PRISM_API_KEY is not set or empty.")
+    if not ANTHROPIC_KEY:
+        errors.append("ANTHROPIC_API_KEY is not set or empty.")
+
+    try:
+        proc = subprocess.run(
+            ["kraken", "--version"], capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode != 0:
+            errors.append(f"kraken CLI returned non-zero exit code: {proc.returncode}")
+    except FileNotFoundError:
+        errors.append("kraken CLI not found on PATH. Install from https://github.com/nicholasgasior/kraken-cli")
+    except subprocess.TimeoutExpired:
+        errors.append("kraken CLI timed out during version check.")
+
+    if errors:
+        for e in errors:
+            logger.error("Preflight failed: %s", e)
+        sys.exit(1)
+
+    try:
+        _run_kraken_json(["paper", "balance"])
+    except RuntimeError:
+        logger.info("Paper account not initialized — running 'kraken paper init'...")
+        subprocess.run(["kraken", "paper", "init"], check=False, timeout=15)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # already caught above
+
+    logger.info("Preflight checks passed.")
 
 
 def get_market_data(symbol: str) -> dict:
@@ -242,11 +303,6 @@ def check_risk(decision: dict, portfolio_state: dict) -> dict:
     }
 
 
-ASSETS = ["BTC", "ETH"]
-LOOP_INTERVAL_SECONDS = 300  # 5 minutes
-LOG_PATH = os.path.join(os.path.dirname(__file__), "logs", "trades.json")
-
-
 def get_portfolio_status() -> dict:
     """
     Fetch current portfolio status from `kraken paper status`.
@@ -417,6 +473,8 @@ def _save_log(trade_log: list) -> None:
 
 
 def main() -> None:
+    _preflight()
+
     portfolio_state = {
         "balance_usd": 10000.0,
         "starting_balance": 10000.0,
@@ -427,140 +485,162 @@ def main() -> None:
     }
     cycle = 0
 
-    print("ARIA trading agent started.")
-    print(f"Assets: {ASSETS} | Interval: {LOOP_INTERVAL_SECONDS}s | Log: {LOG_PATH}")
-    print("Press Ctrl+C to stop.\n")
+    logger.info("ARIA trading agent started.")
+    logger.info("Assets: %s | Interval: %ss | Log: %s", ASSETS, LOOP_INTERVAL_SECONDS, LOG_PATH)
 
     while True:
-        cycle += 1
-        now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        try:
+            cycle += 1
+            now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-        # --- Portfolio status ---
-        ps = get_portfolio_status()
-        portfolio_state["portfolio_status"] = ps
-        if ps.get("error"):
-            print(f"[ARIA] Portfolio status unavailable: {ps['error']}")
-        else:
-            pnl_sign = "+" if ps["unrealized_pnl"] >= 0 else ""
-            print(
-                f"[ARIA] Portfolio: ${ps['total_value']:,.2f} | "
-                f"PnL: {pnl_sign}${ps['unrealized_pnl']:,.2f} ({pnl_sign}{ps['pnl_percent']:.3f}%) | "
-                f"Trades: {ps['total_trades']}"
+            # --- Portfolio status ---
+            ps = get_portfolio_status()
+            portfolio_state["portfolio_status"] = ps
+            if ps.get("error"):
+                logger.warning("Portfolio status unavailable: %s", ps["error"])
+            else:
+                pnl_sign = "+" if ps["unrealized_pnl"] >= 0 else ""
+                logger.info(
+                    "Portfolio: $%s | PnL: %s$%s (%s%s%%) | Trades: %s",
+                    f"{ps['total_value']:,.2f}",
+                    pnl_sign,
+                    f"{abs(ps['unrealized_pnl']):,.2f}",
+                    pnl_sign,
+                    f"{abs(ps['pnl_percent']):.3f}",
+                    ps["total_trades"],
+                )
+
+            # --- Sync portfolio state from Kraken paper account ---
+            kb = get_kraken_balance()
+            if "error" in kb:
+                logger.warning("Could not sync Kraken balance: %s — using cached state", kb["error"])
+            else:
+                portfolio_state["balance_usd"] = kb.get("USD", portfolio_state["balance_usd"])
+                portfolio_state["positions"] = kb.get("positions", {})
+
+            logger.info("=== Cycle %d — %s ===", cycle, now)
+            logger.info(
+                "Balance: $%s | Trades today: %d/10",
+                f"{portfolio_state['balance_usd']:,.2f}",
+                portfolio_state["trades_today"],
             )
 
-        # --- Sync portfolio state from Kraken paper account ---
-        kb = get_kraken_balance()
-        if "error" in kb:
-            print(f"\n  [WARN] Could not sync Kraken balance: {kb['error']} — using cached state")
-        else:
-            portfolio_state["balance_usd"] = kb.get("USD", portfolio_state["balance_usd"])
-            portfolio_state["positions"] = kb.get("positions", {})
+            for symbol in ASSETS:
+                try:
+                    logger.info("[%s] Processing...", symbol)
 
-        print(f"\n{'='*60}")
-        print(f"  Cycle {cycle} — {now}")
-        print(f"  Balance: ${portfolio_state['balance_usd']:,.2f}  |  Trades today: {portfolio_state['trades_today']}/10")
-        print(f"{'='*60}")
+                    # --- 1. Market data ---
+                    market_data = get_market_data(symbol)
+                    if market_data.get("error"):
+                        logger.error("[%s] Market data error: %s", symbol, market_data["error"])
+                        continue
 
-        for symbol in ASSETS:
-            print(f"\n  [{symbol}]")
+                    price = market_data["price"]
+                    change_pct = (market_data["change_24h"] or 0) * 100
+                    logger.info(
+                        "[%s] Price: $%s | 24h: %+.2f%% | Signal: %s (%s)",
+                        symbol, f"{price:,.2f}", change_pct,
+                        market_data["signal"], market_data["signal_strength"],
+                    )
 
-            # --- 1. Market data ---
-            market_data = get_market_data(symbol)
-            if market_data.get("error"):
-                print(f"    ✗ Market data error: {market_data['error']}")
-                continue
+                    # --- 2. Claude decision ---
+                    decision = get_claude_decision(market_data)
+                    if decision.get("error"):
+                        logger.error("[%s] Decision error: %s", symbol, decision["error"])
+                        continue
 
-            price = market_data["price"]
-            change_pct = (market_data["change_24h"] or 0) * 100
-            print(f"    Price: ${price:,.2f}  |  24h: {change_pct:+.2f}%  |  Signal: {market_data['signal']} ({market_data['signal_strength']})")
+                    action = decision["action"].upper()
+                    confidence = decision["confidence"]
+                    risk_level = decision["risk_level"]
+                    logger.info(
+                        "[%s] Decision: %s | Confidence: %d | Risk: %s",
+                        symbol, action, confidence, risk_level,
+                    )
 
-            # --- 2. Claude decision ---
-            decision = get_claude_decision(market_data)
-            if decision.get("error"):
-                print(f"    ✗ Decision error: {decision['error']}")
-                continue
-
-            action = decision["action"].upper()
-            confidence = decision["confidence"]
-            risk_level = decision["risk_level"]
-            print(f"    Decision: {action}  |  Confidence: {confidence}  |  Risk: {risk_level}")
-
-            # --- 3. Risk check ---
-            decision["symbol"] = symbol
-            risk = check_risk(decision, portfolio_state)
-            approved = risk["approved"]
-            status_icon = "✓" if approved else "✗"
-            print(f"    {status_icon} Risk check: {risk['reason']}")
-
-            # --- 4. Execute if approved and actionable ---
-            if approved and action in ("BUY", "SELL"):
-                if action == "BUY":
-                    position_usd = risk["position_usd"]
-                    volume = position_usd / price
-                else:  # SELL — use full held volume
-                    held = portfolio_state["positions"].get(symbol, {})
-                    volume = held.get("volume", 0.0)
-                    position_usd = volume * price
-
-                cli_output = _run_kraken_paper(action, symbol, volume)
-                print(f"    → CLI: {cli_output}")
-
-                # Update portfolio state
-                if action == "BUY":
-                    existing = portfolio_state["positions"].get(symbol)
-                    if existing:
-                        total_vol = existing["volume"] + volume
-                        avg_price = (
-                            (existing["avg_price"] * existing["volume"] + price * volume)
-                            / total_vol
-                        )
-                        portfolio_state["positions"][symbol] = {
-                            "volume": total_vol,
-                            "avg_price": avg_price,
-                        }
+                    # --- 3. Risk check ---
+                    decision["symbol"] = symbol
+                    risk = check_risk(decision, portfolio_state)
+                    approved = risk["approved"]
+                    if approved:
+                        logger.info("[%s] Risk check APPROVED: %s", symbol, risk["reason"])
                     else:
-                        portfolio_state["positions"][symbol] = {
+                        logger.info("[%s] Risk check REJECTED: %s", symbol, risk["reason"])
+
+                    # --- 4. Execute if approved and actionable ---
+                    if approved and action in ("BUY", "SELL"):
+                        if action == "BUY":
+                            position_usd = risk["position_usd"]
+                            volume = position_usd / price
+                        else:  # SELL — use full held volume
+                            held = portfolio_state["positions"].get(symbol, {})
+                            volume = held.get("volume", 0.0)
+                            position_usd = volume * price
+
+                        cli_output = _run_kraken_paper(action, symbol, volume)
+                        logger.info("[%s] CLI: %s", symbol, cli_output)
+
+                        # Update portfolio state
+                        if action == "BUY":
+                            existing = portfolio_state["positions"].get(symbol)
+                            if existing:
+                                total_vol = existing["volume"] + volume
+                                avg_price = (
+                                    (existing["avg_price"] * existing["volume"] + price * volume)
+                                    / total_vol
+                                )
+                                portfolio_state["positions"][symbol] = {
+                                    "volume": total_vol,
+                                    "avg_price": avg_price,
+                                }
+                            else:
+                                portfolio_state["positions"][symbol] = {
+                                    "volume": volume,
+                                    "avg_price": price,
+                                }
+                            portfolio_state["balance_usd"] = round(
+                                portfolio_state["balance_usd"] - position_usd, 2
+                            )
+                        else:  # SELL
+                            portfolio_state["balance_usd"] = round(
+                                portfolio_state["balance_usd"] + position_usd, 2
+                            )
+                            portfolio_state["positions"].pop(symbol, None)
+
+                        portfolio_state["trades_today"] += 1
+
+                        # Append to trade log
+                        portfolio_state["trade_log"].append({
+                            "timestamp": now,
+                            "cycle": cycle,
+                            "symbol": symbol,
+                            "action": action,
+                            "price": price,
                             "volume": volume,
-                            "avg_price": price,
-                        }
-                    portfolio_state["balance_usd"] = round(
-                        portfolio_state["balance_usd"] - position_usd, 2
-                    )
-                else:  # SELL
-                    portfolio_state["balance_usd"] = round(
-                        portfolio_state["balance_usd"] + position_usd, 2
-                    )
-                    portfolio_state["positions"].pop(symbol, None)
+                            "position_usd": position_usd,
+                            "confidence": confidence,
+                            "risk_level": risk_level,
+                            "reasoning": decision.get("reasoning"),
+                            "cli_output": cli_output,
+                            "balance_after": portfolio_state["balance_usd"],
+                        })
 
-                portfolio_state["trades_today"] += 1
+                except Exception:
+                    logger.exception("[%s] Unhandled error processing asset — skipping.", symbol)
 
-                # Append to trade log
-                portfolio_state["trade_log"].append({
-                    "timestamp": now,
-                    "cycle": cycle,
-                    "symbol": symbol,
-                    "action": action,
-                    "price": price,
-                    "volume": volume,
-                    "position_usd": position_usd,
-                    "confidence": confidence,
-                    "risk_level": risk_level,
-                    "reasoning": decision.get("reasoning"),
-                    "cli_output": cli_output,
-                    "balance_after": portfolio_state["balance_usd"],
-                })
+            # --- Save log after every full cycle ---
+            _save_log(portfolio_state["trade_log"])
+            logger.info("Log saved → %s", LOG_PATH)
+            logger.info("Sleeping %ds until next cycle...", LOOP_INTERVAL_SECONDS)
 
-        # --- Save log after every full cycle ---
-        _save_log(portfolio_state["trade_log"])
-        print(f"\n  Log saved → {LOG_PATH}")
-        print(f"  Sleeping {LOOP_INTERVAL_SECONDS}s until next cycle…")
+        except Exception:
+            logger.exception("Unhandled error in cycle %d — continuing.", cycle)
+
         time.sleep(LOOP_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) > 1 and sys.argv[1] == "test-balance":
-        print("Testing get_kraken_balance()…")
+        logger.info("Testing get_kraken_balance()...")
         bal = get_kraken_balance()
         print(json.dumps(bal, indent=2))
         sys.exit(0)
