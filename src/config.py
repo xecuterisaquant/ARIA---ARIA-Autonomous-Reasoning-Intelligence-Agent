@@ -25,7 +25,8 @@ LOOP_INTERVAL_SECONDS = int(os.environ.get("ARIA_LOOP_INTERVAL", "300"))
 DASHBOARD_PORT = int(os.environ.get("PORT", "8080"))
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+# src/config.py lives one level below the repo root — go up twice to get root.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(_ROOT, os.environ.get("ARIA_LOG_DIR", "logs"))
 LOG_PATH = os.path.join(LOG_DIR, "trades.json")
 ARIA_LOG_FILE = os.path.join(LOG_DIR, "aria.log")

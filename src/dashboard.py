@@ -1,15 +1,14 @@
-"""
-ARIA Web Dashboard — reads logs/trades.json + logs/status.json and serves
+"""ARIA Web Dashboard — reads logs/trades.json + logs/status.json and serves
 a lightweight HTML page on PORT (default 8080).
 
-Run standalone:  python dashboard.py
+Run standalone:  python -m src.dashboard
 Or imported by aria.py which starts it in a daemon thread.
 """
 import json
 
 from flask import Flask, jsonify, render_template_string
 
-from config import LOG_PATH as TRADES_PATH, STATUS_PATH, DASHBOARD_PORT as PORT
+from .config import LOG_PATH as TRADES_PATH, STATUS_PATH, DASHBOARD_PORT as PORT
 
 app = Flask(__name__)
 
@@ -71,7 +70,6 @@ _HTML = """<!DOCTYPE html>
   <h1>⚡ ARIA</h1>
   <p class="subtitle">Autonomous Reasoning &amp; Intelligence Agent &mdash; Live Dashboard</p>
 
-  <!-- Portfolio cards -->
   <div class="cards">
     <div class="card">
       <div class="label">Portfolio Value</div>
@@ -94,7 +92,6 @@ _HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Last decision per asset -->
   {% if last_decisions %}
   <div class="section-title">Last Decision Per Asset</div>
   <div class="last-decisions" style="margin-bottom:32px">
@@ -113,24 +110,15 @@ _HTML = """<!DOCTYPE html>
   </div>
   {% endif %}
 
-  <!-- Trade history table -->
   <div class="section-title">Trade History ({{ trades|length }} executed trades)</div>
   {% if trades %}
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th>Time</th>
-          <th>Cycle</th>
-          <th>Asset</th>
-          <th>Action</th>
-          <th>Price</th>
-          <th>Volume</th>
-          <th>USD Value</th>
-          <th>Confidence</th>
-          <th>Risk</th>
-          <th>Balance After</th>
-          <th>Reasoning</th>
+          <th>Time</th><th>Cycle</th><th>Asset</th><th>Action</th>
+          <th>Price</th><th>Volume</th><th>USD Value</th>
+          <th>Confidence</th><th>Risk</th><th>Balance After</th><th>Reasoning</th>
         </tr>
       </thead>
       <tbody>
@@ -166,7 +154,6 @@ def index():
     trades = _read_json(TRADES_PATH, [])
     raw_status = _read_json(STATUS_PATH, {})
 
-    # Build a status object with safe defaults
     class _S:
         total_value = raw_status.get("total_value", 0.0)
         unrealized_pnl = raw_status.get("unrealized_pnl", 0.0)
@@ -174,7 +161,6 @@ def index():
         total_trades = raw_status.get("total_trades", len(trades))
         timestamp = raw_status.get("timestamp", "—")
 
-    # Latest decision per asset (last entry per symbol)
     seen: set = set()
     last_decisions = []
     for t in reversed(trades):

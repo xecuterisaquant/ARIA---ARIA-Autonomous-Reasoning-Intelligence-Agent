@@ -6,7 +6,7 @@ atomic write (temp file + os.replace) so the dashboard never reads a partial fil
 import json
 import os
 
-from config import LOG_DIR, LOG_PATH, STATUS_PATH
+from .config import LOG_DIR, LOG_PATH, STATUS_PATH
 
 
 def save_log(trade_log: list) -> None:

@@ -5,7 +5,7 @@ for any supported crypto symbol.
 """
 import requests
 
-from config import API_KEY, BASE_URL, logger
+from .config import API_KEY, BASE_URL, logger
 
 
 def get_market_data(symbol: str) -> dict:

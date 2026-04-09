@@ -7,8 +7,8 @@ import json
 
 import anthropic
 
-import memory
-from config import ANTHROPIC_KEY, logger
+from . import memory
+from .config import ANTHROPIC_KEY, logger
 
 
 def get_claude_decision(

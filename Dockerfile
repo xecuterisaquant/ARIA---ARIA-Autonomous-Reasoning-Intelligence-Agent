@@ -17,7 +17,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Application ───────────────────────────────────────────────────────────────
-COPY *.py ./
+COPY aria.py ./
+COPY src/ ./src/
 RUN mkdir -p logs
 
 # Expose dashboard port (Railway injects PORT env var automatically)

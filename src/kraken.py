@@ -5,7 +5,7 @@ All subprocess calls to the `kraken` binary live here.
 import json
 import subprocess
 
-from config import logger
+from .config import logger
 
 
 def run_kraken_command(args: list) -> dict:
@@ -73,14 +73,13 @@ def get_kraken_balance() -> dict:
             if isinstance(info, dict) and "total" in info
         }
 
-        # Replay fills in chronological order to compute running avg cost basis
         hist_raw = run_kraken_command(["paper", "history"])
-        running: dict[str, dict] = {}  # {symbol: {volume, cost_basis}}
+        running: dict[str, dict] = {}
         for t in sorted(hist_raw.get("trades", []), key=lambda x: x.get("time", "")):
             if t.get("status") != "filled":
                 continue
             pair: str = t.get("pair", "")
-            base = pair[:-3] if len(pair) > 3 else pair  # strip "USD" / "EUR"
+            base = pair[:-3] if len(pair) > 3 else pair
             vol = float(t.get("volume", 0))
             price = float(t.get("price", 0))
             side = t.get("side", "").lower()

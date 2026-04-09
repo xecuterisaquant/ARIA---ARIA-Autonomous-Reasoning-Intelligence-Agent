@@ -12,7 +12,7 @@ Ordered rules (any failure rejects the trade):
   5. Position sizing cap         →  10% (LOW) / 15% (MEDIUM) of balance,
                                     capped at 20% of starting balance
 """
-from config import logger
+from .config import logger
 
 
 def check_risk(decision: dict, portfolio_state: dict) -> dict:

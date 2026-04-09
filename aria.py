@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 
-from config import (
+from src.config import (
     API_KEY,
     ANTHROPIC_KEY,
     ASSETS,
@@ -17,12 +17,12 @@ from config import (
     LOOP_INTERVAL_SECONDS,
     logger,
 )
-from kraken import execute_paper_trade, get_kraken_balance, get_portfolio_status, run_kraken_command
-from market import get_market_data
-from agent import get_claude_decision
-from risk import check_risk
-from store import save_log, save_status
-import memory
+from src.kraken import execute_paper_trade, get_kraken_balance, get_portfolio_status, run_kraken_command
+from src.market import get_market_data
+from src.agent import get_claude_decision
+from src.risk import check_risk
+from src.store import save_log, save_status
+from src import memory
 
 
 # ── Startup preflight ─────────────────────────────────────────────────
@@ -67,7 +67,7 @@ def main() -> None:
 
     # Start the web dashboard in a daemon thread
     try:
-        import dashboard as _dashboard
+        from src import dashboard as _dashboard
         _t = threading.Thread(target=_dashboard.run_dashboard, daemon=True, name="aria-dashboard")
         _t.start()
         logger.info("Dashboard started on port %d", DASHBOARD_PORT)

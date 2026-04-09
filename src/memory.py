@@ -1,18 +1,19 @@
-"""
-ARIA Memory System — logs/memory.json
+"""ARIA Memory System — logs/memory.json
 
 Tracks full trade lifecycles (entry → exit) so Claude can learn from past
 performance on each asset.
 """
+import datetime
 import json
 import os
 import uuid
 
-from config import LOG_DIR
+from .config import LOG_DIR
+
 MEMORY_PATH = os.path.join(LOG_DIR, "memory.json")
 
 
-# ─── Persistence helpers ──────────────────────────────────────────────────────
+# ── Persistence helpers ───────────────────────────────────────────────────────
 
 def _load() -> list:
     try:
@@ -23,18 +24,18 @@ def _load() -> list:
 
 
 def _save(entries: list) -> None:
-    os.makedirs(_LOG_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
     tmp = MEMORY_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=2)
     os.replace(tmp, MEMORY_PATH)
 
 
-# ─── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def record_entry(asset: str, market_data: dict, decision: dict) -> str:
-    """
-    Called immediately after a BUY is executed.
+    """Called immediately after a BUY is executed.
+
     Creates a new open memory entry and returns its id.
     """
     entry = {
@@ -61,15 +62,14 @@ def record_entry(asset: str, market_data: dict, decision: dict) -> str:
 
 
 def record_exit(asset: str, exit_price: float) -> None:
-    """
-    Called immediately after a SELL is executed.
+    """Called immediately after a SELL is executed.
+
     Finds the most recent open entry for this asset, fills exit fields,
     and calculates outcome.
     """
     entries = _load()
     asset = asset.upper()
 
-    # Find the latest open entry for this asset (exit_price is None)
     target = None
     for e in reversed(entries):
         if e.get("asset") == asset and e.get("exit_price") is None:
@@ -77,7 +77,7 @@ def record_exit(asset: str, exit_price: float) -> None:
             break
 
     if target is None:
-        return  # No open entry to close — nothing to do
+        return
 
     entry_price = target.get("entry_price") or 0.0
     outcome_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price else 0.0
@@ -105,26 +105,21 @@ def record_exit(asset: str, exit_price: float) -> None:
 
 
 def get_relevant_memories(asset: str, n: int = 5) -> str:
-    """
-    Returns the n most recent *closed* trades for this asset as a
-    formatted multi-line string for inclusion in the Claude prompt.
+    """Return the n most recent closed trades for this asset as a formatted string.
 
     Returns an empty string if no closed memories exist.
     """
     asset = asset.upper()
-    entries = _load()
-
     closed = [
-        e for e in entries
+        e for e in _load()
         if e.get("asset") == asset and e.get("exit_price") is not None
     ]
-    recent = closed[-n:]
 
-    if not recent:
+    if not closed:
         return ""
 
     lines = []
-    for e in reversed(recent):
+    for e in reversed(closed[-n:]):
         entry_p = e.get("entry_price") or 0.0
         exit_p = e.get("exit_price") or 0.0
         signal = e.get("entry_signal") or "unknown"
@@ -134,10 +129,7 @@ def get_relevant_memories(asset: str, n: int = 5) -> str:
         outcome = (e.get("outcome") or "unknown").upper()
         confidence = e.get("entry_confidence") or 0
         justified = e.get("confidence_justified")
-        if justified is None:
-            just_str = ""
-        else:
-            just_str = " (justified)" if justified else " (NOT justified)"
+        just_str = "" if justified is None else (" (justified)" if justified else " (NOT justified)")
         pct_sign = "+" if outcome_pct >= 0 else ""
         lines.append(
             f"{asset} | Bought at ${entry_p:,.2f} ({signal} signal{rsi_str}) | "
@@ -147,8 +139,7 @@ def get_relevant_memories(asset: str, n: int = 5) -> str:
     return "\n".join(lines)
 
 
-# ─── Internal helpers ─────────────────────────────────────────────────────────
+# ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _utcnow() -> str:
-    import datetime
     return datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
