@@ -1,0 +1,14 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python aria.py"
+healthcheckPath = "/"
+healthcheckTimeout = 30
+
+[[services]]
+name = "aria-agent"
+
+[services.variables]
+PORT = "8080"
