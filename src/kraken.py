@@ -68,9 +68,12 @@ def get_kraken_balance() -> dict:
     """
     try:
         bal_raw = run_kraken_command(["futures", "paper", "balance"])
+        # available_margin = free capital after position margin is locked
+        # collateral = total account value (ignores margin used by open positions)
         collateral = float(
-            bal_raw.get("collateral")
-            or bal_raw.get("available_margin")
+            bal_raw.get("available_margin")
+            or bal_raw.get("availableMargin")
+            or bal_raw.get("collateral")
             or bal_raw.get("equity")
             or bal_raw.get("USD", 0.0)
         )

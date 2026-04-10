@@ -306,7 +306,8 @@ def _execute_trade(
             "entry_price": price,
             "unrealized_pnl": 0.0,
         }
-        portfolio_state["collateral"] = round(portfolio_state["collateral"] - position_usd, 2)
+        # Collateral is synced from Kraken each cycle (available_margin)
+        # so no manual subtraction needed here.
         memory.record_entry(symbol, market_data, decision)
 
     elif action == "CLOSE":
@@ -329,12 +330,18 @@ def _execute_trade(
             price = trade_result["fill_price"]
             position_usd = size * price
 
-        portfolio_state["collateral"] = round(portfolio_state["collateral"] + position_usd, 2)
+        # Collateral is synced from Kraken each cycle (available_margin)
+        # so no manual addition needed here.
         portfolio_state["positions"].pop(symbol, None)
         memory.record_exit(symbol, price)
 
     else:
         return
+
+    # Re-sync collateral from Kraken so balance_after reflects true available margin
+    kb = get_kraken_balance()
+    if "error" not in kb:
+        portfolio_state["collateral"] = kb.get("collateral", portfolio_state["collateral"])
 
     portfolio_state["trades_today"] += 1
     portfolio_state["trade_log"].append({
