@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "timestamp": "2026-04-10T02:35:56Z",
+    "cycle": 1,
+    "symbol": "BTC",
+    "action": "LONG",
+    "price": 72186.23594595,
+    "volume": 0.020779584644406955,
+    "position_usd": 1500.0,
+    "confidence": 78,
+    "risk_level": "MEDIUM",
+    "reasoning": "Price has broken above the $71,922 resistance level and is now trading at $72,186. Per the critical rule in the framework, a resistance breakout with ADX > 40 (currently 48.4) is a near-certain LONG signal. MACD histogram at 1014 is positive, and price is above the Bollinger mid-band at $71,605. The only caution is the slightly negative momentum score, but the breakout + trend strength confluence overrides this.",
+    "regime": "breakout",
+    "cli_output": "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502 Field    \u2506 Value                               \u2502\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\n\u2502 Mode     \u2506 [FUTURES PAPER] Simulated Trading   \u2502\n\u2502 Order ID \u2506 FP-00001                            \u2502\n\u2502 Symbol   \u2506 PI_XBTUSD                           \u2502\n\u2502 Side     \u2506 long                                \u2502\n\u2502 Status   \u2506 filled                              \u2502\n\u2502 Fill     \u2506 0.02077958 @ 72179.50 (fee: 0.7499) \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518",
+    "balance_after": 8500.0
+  }
+]

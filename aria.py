@@ -17,12 +17,20 @@ from src.config import (
     LOOP_INTERVAL_SECONDS,
     logger,
 )
-from src.kraken import execute_paper_trade, get_kraken_balance, get_portfolio_status, run_kraken_command
-from src.market import get_market_data
+from src.kraken import execute_futures_trade, get_kraken_balance, get_portfolio_status, run_kraken_command
+from src.market import get_market_data, get_fear_greed
 from src.agent import get_claude_decision
 from src.risk import check_risk
 from src.store import save_log, save_status
 from src import memory
+
+
+# ── Futures symbol mapping ─────────────────────────────────────────────
+# PRISM API uses BTC/ETH; Kraken futures CLI uses PI_XBTUSD/PI_ETHUSD
+FUTURES_SYMBOLS = {
+    "BTC": "PI_XBTUSD",
+    "ETH": "PI_ETHUSD",
+}
 
 
 # ── Startup preflight ─────────────────────────────────────────────────
@@ -52,12 +60,22 @@ def _preflight() -> None:
         sys.exit(1)
 
     try:
-        run_kraken_command(["paper", "balance"])
+        run_kraken_command(["futures", "paper", "balance"])
     except RuntimeError:
-        logger.info("Paper account not initialized — running 'kraken paper init'...")
-        subprocess.run(["kraken", "paper", "init"], check=False, timeout=15)
+        logger.info("Futures paper account not initialized — running 'kraken futures paper init'...")
+        subprocess.run(["kraken", "futures", "paper", "init"], check=False, timeout=15)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass  # already caught above
+
+    # Set 1x leverage for all futures symbols
+    for sym in FUTURES_SYMBOLS.values():
+        try:
+            subprocess.run(
+                ["kraken", "futures", "paper", "set-leverage", sym, "1"],
+                capture_output=True, timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
     logger.info("Preflight checks passed.")
 
@@ -75,7 +93,7 @@ def main() -> None:
         logger.warning("Could not start dashboard: %s", exc)
 
     portfolio_state: dict = {
-        "balance_usd": 10000.0,
+        "collateral": 10000.0,
         "starting_balance": 10000.0,
         "positions": {},
         "trades_today": 0,
@@ -83,6 +101,7 @@ def main() -> None:
         "trade_log": [],
         "portfolio_status": {},
     }
+    latest_decisions: dict = {}
     cycle = 0
 
     logger.info("ARIA trading agent started.")
@@ -91,7 +110,7 @@ def main() -> None:
     while True:
         try:
             cycle += 1
-            now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            now = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             today = now[:10]
 
             # Daily reset
@@ -119,29 +138,39 @@ def main() -> None:
             if "error" in kb:
                 logger.warning("Could not sync Kraken balance: %s — using cached state", kb["error"])
             else:
-                portfolio_state["balance_usd"] = kb.get("USD", portfolio_state["balance_usd"])
+                portfolio_state["collateral"] = kb.get("collateral", portfolio_state["collateral"])
                 portfolio_state["positions"] = kb.get("positions", {})
 
             logger.info("=== Cycle %d — %s ===", cycle, now)
+
+            # Fetch fear/greed once per cycle
+            fear_greed = get_fear_greed()
+            if fear_greed.get("score") is not None:
+                logger.info("Fear & Greed: %s (%s)", fear_greed["score"], fear_greed.get("label"))
+
             logger.info(
-                "Balance: $%s | Trades today: %d/10",
-                f"{portfolio_state['balance_usd']:,.2f}",
+                "Collateral: $%s | Trades today: %d/10",
+                f"{portfolio_state['collateral']:,.2f}",
                 portfolio_state["trades_today"],
             )
 
-            for symbol in ASSETS:
+            for i, symbol in enumerate(ASSETS):
+                if i > 0:
+                    time.sleep(5)  # pace API calls to stay under 10 req/min
                 try:
-                    _process_asset(symbol, now, cycle, portfolio_state)
+                    _process_asset(symbol, now, cycle, portfolio_state, fear_greed, latest_decisions)
                 except Exception:
                     logger.exception("[%s] Unhandled error — skipping.", symbol)
 
             save_log(portfolio_state["trade_log"])
             save_status({
-                "total_value": ps.get("total_value", portfolio_state["balance_usd"]),
+                "total_value": ps.get("total_value", portfolio_state["collateral"]),
                 "unrealized_pnl": ps.get("unrealized_pnl", 0.0),
                 "pnl_percent": ps.get("pnl_percent", 0.0),
                 "total_trades": ps.get("total_trades", len(portfolio_state["trade_log"])),
                 "timestamp": now,
+                "fear_greed": fear_greed,
+                "latest_decisions": latest_decisions,
             })
             logger.info("Log saved → %s", LOG_PATH)
             logger.info("Sleeping %ds until next cycle...", LOOP_INTERVAL_SECONDS)
@@ -152,7 +181,7 @@ def main() -> None:
         time.sleep(LOOP_INTERVAL_SECONDS)
 
 
-def _process_asset(symbol: str, now: str, cycle: int, portfolio_state: dict) -> None:
+def _process_asset(symbol: str, now: str, cycle: int, portfolio_state: dict, fear_greed: dict, latest_decisions: dict) -> None:
     """Run the full decision → risk → execution pipeline for one asset."""
     logger.info("[%s] Processing...", symbol)
 
@@ -162,26 +191,50 @@ def _process_asset(symbol: str, now: str, cycle: int, portfolio_state: dict) -> 
         return
 
     price = market_data["price"]
-    change_pct = (market_data["change_24h"] or 0) * 100
+    change_pct = market_data["change_24h"] or 0
     logger.info(
-        "[%s] Price: $%s | 24h: %+.2f%% | Signal: %s (%s)",
+        "[%s] $%s (%+.2f%%) | RSI: %s | ADX: %s | Momentum: %s",
         symbol, f"{price:,.2f}", change_pct,
-        market_data["signal"], market_data["signal_strength"],
+        market_data.get("rsi"), market_data.get("adx"),
+        market_data.get("momentum_score"),
     )
 
-    decision = get_claude_decision(market_data, portfolio_state)
+    decision = get_claude_decision(market_data, portfolio_state, fear_greed)
     if decision.get("error"):
         logger.error("[%s] Decision error: %s", symbol, decision["error"])
         return
 
     action = decision["action"].upper()
     logger.info(
-        "[%s] Decision: %s | Confidence: %d | Risk: %s",
-        symbol, action, decision["confidence"], decision["risk_level"],
+        "[%s] %s | Regime: %s | Confidence: %d | Risk: %s",
+        symbol, action, decision.get("regime", "?"),
+        decision["confidence"], decision["risk_level"],
     )
+
+    # Snapshot latest decision for dashboard (includes HOLDs)
+    latest_decisions[symbol] = {
+        "symbol": symbol,
+        "price": price,
+        "change_24h": market_data.get("change_24h"),
+        "timestamp": now,
+        "action": action,
+        "confidence": decision.get("confidence"),
+        "risk_level": decision.get("risk_level"),
+        "reasoning": decision.get("reasoning"),
+        "regime": decision.get("regime"),
+        "confluent_signals": decision.get("confluent_signals", []),
+        "confluent_count": decision.get("confluent_count", 0),
+        "structure_context": decision.get("structure_context"),
+        "bull_case": decision.get("bull_case"),
+        "bear_case": decision.get("bear_case"),
+        "hold_period": decision.get("hold_period"),
+        "nearest_support": market_data.get("nearest_support"),
+        "nearest_resistance": market_data.get("nearest_resistance"),
+    }
 
     decision["symbol"] = symbol
     decision["current_price"] = price
+    decision["atr"] = market_data.get("atr")
     risk = check_risk(decision, portfolio_state)
     if "forced_action" in risk:
         action = risk["forced_action"]
@@ -191,7 +244,7 @@ def _process_asset(symbol: str, now: str, cycle: int, portfolio_state: dict) -> 
     else:
         logger.info("[%s] Risk check REJECTED: %s", symbol, risk["reason"])
 
-    if risk["approved"] and action in ("BUY", "SELL"):
+    if risk["approved"] and action in ("LONG", "SHORT", "CLOSE"):
         _execute_trade(symbol, action, price, risk, now, cycle, decision, market_data, portfolio_state)
 
 
@@ -206,34 +259,70 @@ def _execute_trade(
     market_data: dict,
     portfolio_state: dict,
 ) -> None:
-    """Execute a paper trade and update portfolio state, trade log, and memory."""
-    if action == "BUY":
+    """Execute a futures paper trade and update portfolio state, trade log, and memory."""
+    futures_sym = FUTURES_SYMBOLS.get(symbol, symbol)
+
+    if action in ("LONG", "SHORT"):
         position_usd = risk["position_usd"]
-        volume = position_usd / price
-    else:
+        size = position_usd / price
+
+        # LONG = futures buy, SHORT = futures sell
+        cli_action = "buy" if action == "LONG" else "sell"
+        trade_result = execute_futures_trade(cli_action, futures_sym, size)
+        cli_output = trade_result["raw_output"]
+        logger.info("[%s] CLI: %s", symbol, cli_output)
+
+        if not trade_result["success"]:
+            logger.error("[%s] Trade execution FAILED — aborting position update.", symbol)
+            return
+
+        # Use actual fill price/size if available
+        if trade_result.get("fill_price"):
+            price = trade_result["fill_price"]
+        if trade_result.get("fill_size"):
+            size = trade_result["fill_size"]
+
+        # Close existing opposite position first (if any)
         held = portfolio_state["positions"].get(symbol, {})
-        volume = held.get("volume", 0.0)
-        position_usd = volume * price
+        held_side = (held.get("side") or "").lower()
+        if held_side and held_side != action.lower():
+            memory.record_exit(symbol, price)
 
-    cli_output = execute_paper_trade(action, symbol, volume)
-    logger.info("[%s] CLI: %s", symbol, cli_output)
-
-    if action == "BUY":
-        existing = portfolio_state["positions"].get(symbol)
-        if existing:
-            total_vol = existing["volume"] + volume
-            avg_price = (
-                (existing["avg_price"] * existing["volume"] + price * volume) / total_vol
-            )
-            portfolio_state["positions"][symbol] = {"volume": total_vol, "avg_price": avg_price}
-        else:
-            portfolio_state["positions"][symbol] = {"volume": volume, "avg_price": price}
-        portfolio_state["balance_usd"] = round(portfolio_state["balance_usd"] - position_usd, 2)
+        portfolio_state["positions"][symbol] = {
+            "side": action.lower(),
+            "size": size,
+            "entry_price": price,
+            "unrealized_pnl": 0.0,
+        }
+        portfolio_state["collateral"] = round(portfolio_state["collateral"] - position_usd, 2)
         memory.record_entry(symbol, market_data, decision)
-    else:
-        portfolio_state["balance_usd"] = round(portfolio_state["balance_usd"] + position_usd, 2)
+
+    elif action == "CLOSE":
+        held = portfolio_state["positions"].get(symbol, {})
+        held_side = (held.get("side") or "").lower()
+        size = held.get("size", 0.0)
+        position_usd = size * price
+
+        # CLOSE long = sell, CLOSE short = buy
+        cli_action = "sell" if held_side == "long" else "buy"
+        trade_result = execute_futures_trade(cli_action, futures_sym, size)
+        cli_output = trade_result["raw_output"]
+        logger.info("[%s] CLI: %s", symbol, cli_output)
+
+        if not trade_result["success"]:
+            logger.error("[%s] Close execution FAILED — position may still be open.", symbol)
+            return
+
+        if trade_result.get("fill_price"):
+            price = trade_result["fill_price"]
+            position_usd = size * price
+
+        portfolio_state["collateral"] = round(portfolio_state["collateral"] + position_usd, 2)
         portfolio_state["positions"].pop(symbol, None)
         memory.record_exit(symbol, price)
+
+    else:
+        return
 
     portfolio_state["trades_today"] += 1
     portfolio_state["trade_log"].append({
@@ -242,13 +331,14 @@ def _execute_trade(
         "symbol": symbol,
         "action": action,
         "price": price,
-        "volume": volume,
+        "volume": size,
         "position_usd": position_usd,
         "confidence": decision.get("confidence"),
         "risk_level": decision.get("risk_level"),
         "reasoning": decision.get("reasoning"),
+        "regime": decision.get("regime"),
         "cli_output": cli_output,
-        "balance_after": portfolio_state["balance_usd"],
+        "balance_after": portfolio_state["collateral"],
     })
 
 

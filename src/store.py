@@ -10,10 +10,12 @@ from .config import LOG_DIR, LOG_PATH, STATUS_PATH
 
 
 def save_log(trade_log: list) -> None:
-    """Overwrite logs/trades.json with the full in-memory trade log."""
+    """Atomically overwrite logs/trades.json with the full in-memory trade log."""
     os.makedirs(LOG_DIR, exist_ok=True)
-    with open(LOG_PATH, "w", encoding="utf-8") as f:
+    tmp = LOG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(trade_log, f, indent=2)
+    os.replace(tmp, LOG_PATH)
 
 
 def save_status(status: dict) -> None:

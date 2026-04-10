@@ -21,8 +21,9 @@ ASSETS = [
     for s in os.environ.get("ARIA_ASSETS", "BTC,ETH").split(",")
     if s.strip()
 ]
-LOOP_INTERVAL_SECONDS = int(os.environ.get("ARIA_LOOP_INTERVAL", "300"))
+LOOP_INTERVAL_SECONDS = int(os.environ.get("ARIA_LOOP_INTERVAL", "180"))
 DASHBOARD_PORT = int(os.environ.get("PORT", "8080"))
+DASHBOARD_TOKEN = os.environ.get("ARIA_DASHBOARD_TOKEN", "").strip()
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # src/config.py lives one level below the repo root — go up twice to get root.

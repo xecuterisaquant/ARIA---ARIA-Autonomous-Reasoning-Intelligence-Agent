@@ -1,6 +1,7 @@
-"""Kraken paper trading CLI wrapper.
+"""Kraken futures paper trading CLI wrapper.
 
 All subprocess calls to the `kraken` binary live here.
+Uses `kraken futures paper` commands for perpetual futures trading.
 """
 import json
 import subprocess
@@ -16,23 +17,24 @@ def run_kraken_command(args: list) -> dict:
     result = subprocess.run(
         ["kraken"] + args + ["-o", "json"],
         capture_output=True,
-        text=True,
         timeout=15,
     )
+    stdout = (result.stdout or b"").decode("utf-8", errors="replace")
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
     if result.returncode != 0:
-        err = (result.stderr or result.stdout).strip()
+        err = (stderr or stdout).strip()
         raise RuntimeError(f"kraken exited {result.returncode}: {err}")
-    return json.loads(result.stdout)
+    return json.loads(stdout)
 
 
 def get_portfolio_status() -> dict:
-    """Fetch current portfolio status from `kraken paper status`.
+    """Fetch current portfolio status from `kraken futures paper status`.
 
     Returns total_value, unrealized_pnl, pnl_percent, total_trades.
     Falls back gracefully on any CLI error.
     """
     try:
-        raw = run_kraken_command(["paper", "status"])
+        raw = run_kraken_command(["futures", "paper", "status"])
         total_value = (
             raw.get("total_value") or raw.get("portfolio_value") or raw.get("equity") or 0.0
         )
@@ -59,53 +61,37 @@ def get_portfolio_status() -> dict:
 
 
 def get_kraken_balance() -> dict:
-    """Combine `kraken paper balance` and `kraken paper history`.
+    """Combine `kraken futures paper balance` and `kraken futures paper positions`.
 
-    Returns {"USD": float, "positions": {symbol: {"volume": float, "avg_price": float}}}.
-    Reconstructs average cost basis by replaying fills chronologically.
+    Returns {"collateral": float, "positions": {symbol: {"side": str, "size": float, "entry_price": float, "unrealized_pnl": float}}}.
     Falls back gracefully if the CLI is unavailable.
     """
     try:
-        bal_raw = run_kraken_command(["paper", "balance"])
-        balances = {
-            asset: info["total"]
-            for asset, info in bal_raw.get("balances", {}).items()
-            if isinstance(info, dict) and "total" in info
-        }
+        bal_raw = run_kraken_command(["futures", "paper", "balance"])
+        collateral = float(
+            bal_raw.get("collateral")
+            or bal_raw.get("available_margin")
+            or bal_raw.get("equity")
+            or bal_raw.get("USD", 0.0)
+        )
 
-        hist_raw = run_kraken_command(["paper", "history"])
-        running: dict[str, dict] = {}
-        for t in sorted(hist_raw.get("trades", []), key=lambda x: x.get("time", "")):
-            if t.get("status") != "filled":
-                continue
-            pair: str = t.get("pair", "")
-            base = pair[:-3] if len(pair) > 3 else pair
-            vol = float(t.get("volume", 0))
-            price = float(t.get("price", 0))
-            side = t.get("side", "").lower()
-            entry = running.setdefault(base, {"volume": 0.0, "cost_basis": 0.0})
-            if side == "buy":
-                new_vol = entry["volume"] + vol
-                entry["cost_basis"] = (
-                    (entry["cost_basis"] * entry["volume"] + price * vol) / new_vol
-                    if new_vol > 0
-                    else 0.0
-                )
-                entry["volume"] = new_vol
-            elif side == "sell":
-                entry["volume"] = max(0.0, entry["volume"] - vol)
-                if entry["volume"] == 0.0:
-                    entry["cost_basis"] = 0.0
+        pos_raw = run_kraken_command(["futures", "paper", "positions"])
+        positions: dict[str, dict] = {}
+        for p in pos_raw.get("positions", pos_raw.get("openPositions", [])):
+            symbol_raw = p.get("symbol") or p.get("instrument") or ""
+            side = (p.get("side") or p.get("direction") or "").lower()
+            size = abs(float(p.get("size") or p.get("quantity") or p.get("volume") or 0))
+            entry_price = float(p.get("entry_price") or p.get("avgEntryPrice") or p.get("price") or 0)
+            upnl = float(p.get("unrealized_pnl") or p.get("unrealizedPnl") or p.get("pnl") or 0)
+            if size > 0:
+                positions[symbol_raw] = {
+                    "side": side,
+                    "size": size,
+                    "entry_price": entry_price,
+                    "unrealized_pnl": upnl,
+                }
 
-        positions = {
-            asset: {
-                "volume": total,
-                "avg_price": round(running.get(asset, {}).get("cost_basis", 0.0), 8),
-            }
-            for asset, total in balances.items()
-            if asset != "USD" and total > 0
-        }
-        return {"USD": balances.get("USD", 0.0), "positions": positions}
+        return {"collateral": collateral, "positions": positions}
 
     except FileNotFoundError:
         return {"error": "kraken CLI not found"}
@@ -115,20 +101,66 @@ def get_kraken_balance() -> dict:
         return {"error": f"get_kraken_balance failed: {exc}"}
 
 
-def execute_paper_trade(action: str, symbol: str, volume: float) -> str:
-    """Execute a Kraken paper trade via `kraken paper buy/sell`.
+def execute_futures_trade(action: str, futures_symbol: str, size: float) -> dict:
+    """Execute a Kraken futures paper trade via `kraken futures paper buy/sell`.
 
-    Falls back to a mock response string if the CLI is unavailable.
+    action: "buy" or "sell"
+    futures_symbol: e.g. "PI_XBTUSD"
+    Returns a dict with keys: success, raw_output, order_id, fill_price, fill_size, fee.
     """
-    pair = f"{symbol}/USD"
-    cmd = ["kraken", "paper", action.lower(), pair, f"{volume:.8f}"]
+    if size <= 0:
+        return {"success": False, "raw_output": f"Invalid trade size: {size}"}
+
+    cmd = ["kraken", "futures", "paper", action.lower(), futures_symbol, f"{size:.8f}", "--type", "market"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        return (result.stdout + result.stderr).strip() or f"[kraken exited {result.returncode}]"
+        result = subprocess.run(cmd, capture_output=True, timeout=15)
+        out = (result.stdout or b"").decode("utf-8", errors="replace")
+        err = (result.stderr or b"").decode("utf-8", errors="replace")
+        raw = (out + err).strip() or f"[kraken exited {result.returncode}]"
+
+        parsed = {
+            "success": result.returncode == 0,
+            "raw_output": raw,
+            "order_id": None,
+            "fill_price": None,
+            "fill_size": None,
+            "fee": None,
+        }
+
+        # Try to extract structured data from the CLI table output
+        for line in raw.splitlines():
+            lower = line.lower()
+            if "order id" in lower or "order_id" in lower:
+                parsed["order_id"] = line.split("│")[-1].strip() if "│" in line else line.split()[-1]
+            elif "status" in lower and "filled" in lower:
+                parsed["success"] = True
+            elif "fill" in lower and "@" in line:
+                # e.g. "│ Fill     ┆ 0.02077958 @ 72179.50 (fee: 0.7499) │"
+                fill_part = line.split("│")[-1].strip() if "│" in line else line
+                fill_part = fill_part.replace("┆", "").strip()
+                try:
+                    parts = fill_part.split("@")
+                    if len(parts) == 2:
+                        parsed["fill_size"] = float(parts[0].strip().split()[-1])
+                        price_fee = parts[1].strip()
+                        if "(fee:" in price_fee:
+                            parsed["fill_price"] = float(price_fee.split("(fee:")[0].strip())
+                            parsed["fee"] = float(price_fee.split("(fee:")[1].replace(")", "").strip())
+                        else:
+                            parsed["fill_price"] = float(price_fee.strip())
+                except (ValueError, IndexError):
+                    pass  # best-effort parsing
+
+        if result.returncode != 0:
+            parsed["success"] = False
+            logger.warning("Trade CLI returned exit code %d: %s", result.returncode, raw[:200])
+
+        return parsed
+
     except FileNotFoundError:
-        return f"[MOCK] kraken CLI not found — simulated {action} {volume:.8f} {pair}"
+        return {"success": False, "raw_output": f"[MOCK] kraken CLI not found — simulated {action} {size:.8f} {futures_symbol}"}
     except subprocess.TimeoutExpired:
-        return "[ERROR] kraken CLI timed out"
+        return {"success": False, "raw_output": "[ERROR] kraken CLI timed out"}
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
