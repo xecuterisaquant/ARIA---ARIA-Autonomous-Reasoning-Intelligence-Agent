@@ -15,6 +15,10 @@ build/
 logs/aria.log
 logs/status.json
 logs/memory.json
+logs/memory_archive.json
+
+# Test / cache
+.pytest_cache/
 
 # OS
 .DS_Store
