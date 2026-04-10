@@ -5,10 +5,10 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates build-essential \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Rust (minimal) and build Kraken CLI from crates.io
+# Install Rust (minimal) and build Kraken CLI from GitHub
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
     && . "$HOME/.cargo/env" \
-    && cargo install kraken-cli --version 0.3.0 \
+    && cargo install --git https://github.com/krakenfx/kraken-cli --tag v0.3.0 \
     && cp "$HOME/.cargo/bin/kraken" /usr/local/bin/kraken \
     && rustup self uninstall -y \
     && rm -rf "$HOME/.cargo" \
