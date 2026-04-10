@@ -120,7 +120,7 @@ def get_claude_decision(
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         msg = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-20250514",
             max_tokens=600,
             temperature=0,
             system=system_prompt,
