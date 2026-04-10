@@ -34,8 +34,12 @@ FUTURES_SYMBOLS = {
 
 
 # ── Startup preflight ─────────────────────────────────────────────────
-def _preflight() -> None:
-    """Verify all required dependencies and config before starting the agent."""
+def _preflight() -> bool:
+    """Verify all required dependencies and config before starting the agent.
+
+    Returns True if all checks pass, False otherwise.
+    Never calls sys.exit — the dashboard must stay alive for healthchecks.
+    """
     errors = []
 
     if not API_KEY:
@@ -50,14 +54,14 @@ def _preflight() -> None:
         if proc.returncode != 0:
             errors.append(f"kraken CLI returned non-zero exit code: {proc.returncode}")
     except FileNotFoundError:
-        errors.append("kraken CLI not found on PATH. Install from https://github.com/nicholasgasior/kraken-cli")
+        errors.append("kraken CLI not found on PATH. Install from https://github.com/krakenfx/kraken-cli")
     except subprocess.TimeoutExpired:
         errors.append("kraken CLI timed out during version check.")
 
     if errors:
         for e in errors:
             logger.error("Preflight failed: %s", e)
-        sys.exit(1)
+        return False
 
     try:
         run_kraken_command(["futures", "paper", "balance"])
@@ -78,6 +82,7 @@ def _preflight() -> None:
             pass
 
     logger.info("Preflight checks passed.")
+    return True
 
 
 def main() -> None:
@@ -90,7 +95,14 @@ def main() -> None:
     except Exception as exc:
         logger.warning("Could not start dashboard: %s", exc)
 
-    _preflight()
+    if not _preflight():
+        logger.error("Preflight failed — waiting 60s and retrying...")
+        time.sleep(60)
+        if not _preflight():
+            logger.critical("Preflight failed twice — trading loop will not start. Dashboard stays alive.")
+            # Block forever so dashboard keeps serving healthchecks
+            while True:
+                time.sleep(3600)
 
     portfolio_state: dict = {
         "collateral": 10000.0,
