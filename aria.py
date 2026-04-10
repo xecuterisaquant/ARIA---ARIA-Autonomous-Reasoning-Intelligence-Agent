@@ -81,9 +81,7 @@ def _preflight() -> None:
 
 
 def main() -> None:
-    _preflight()
-
-    # Start the web dashboard in a daemon thread
+    # Start the web dashboard FIRST so healthchecks pass during preflight
     try:
         from src import dashboard as _dashboard
         _t = threading.Thread(target=_dashboard.run_dashboard, daemon=True, name="aria-dashboard")
@@ -91,6 +89,8 @@ def main() -> None:
         logger.info("Dashboard started on port %d", DASHBOARD_PORT)
     except Exception as exc:
         logger.warning("Could not start dashboard: %s", exc)
+
+    _preflight()
 
     portfolio_state: dict = {
         "collateral": 10000.0,
